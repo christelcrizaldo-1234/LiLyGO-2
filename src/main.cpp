@@ -4,13 +4,16 @@
 #include <Wire.h>
 #include <Adafruit_SHT31.h>
 
+#define BOARD_POWERON_PIN 12
+
 Adafruit_SHT31 sht;
 
-
+// MAC Addresses
 uint8_t HELTEC1[] = {0x24,0x58,0x7C,0x5B,0x3C,0xA8};
 uint8_t NODE1[]   = {0x44,0x17,0x93,0xE4,0xDE,0x90};
 uint8_t NODE3[]   = {0xC8,0x2E,0x18,0xAC,0x52,0x34};
 
+// Data Structure
 typedef struct {
   int node_id;
   float soil_moisture;
@@ -27,11 +30,15 @@ typedef struct {
 SensorData data;
 SensorData n1, n3;
 
+// Receive Callback
 #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
 void OnRecv(const esp_now_recv_info_t *info, const uint8_t *d, int len) {
 #else
 void OnRecv(const uint8_t *mac, const uint8_t *d, int len) {
 #endif
+
+  if (len != sizeof(SensorData)) return;
+
   SensorData in;
   memcpy(&in, d, sizeof(in));
 
@@ -39,54 +46,115 @@ void OnRecv(const uint8_t *mac, const uint8_t *d, int len) {
   if (in.node_id == 3) n3 = in;
 }
 
+// Send Data
 void sendData() {
-  if (esp_now_send(HELTEC1, (uint8_t*)&data, sizeof(data)) != ESP_OK) {
+
+  esp_err_t result = esp_now_send(
+    HELTEC1,
+    (uint8_t*)&data,
+    sizeof(data)
+  );
+
+  if (result != ESP_OK) {
     esp_now_send(NODE1, (uint8_t*)&data, sizeof(data));
     esp_now_send(NODE3, (uint8_t*)&data, sizeof(data));
   }
+
   Serial.println("NODE 2 SENT");
 }
 
 void setup() {
+
   Serial.begin(115200);
 
-  Wire.begin();
-  sht.begin(0x44);
+  // Enable battery power on T-A7670E
+  pinMode(BOARD_POWERON_PIN, OUTPUT);
+  digitalWrite(BOARD_POWERON_PIN, HIGH);
 
+  delay(1000);
+
+  // I2C
+  Wire.begin();
+
+  // SHT30
+  if (!sht.begin(0x44)) {
+    Serial.println("SHT30 NOT FOUND");
+    while (1);
+  }
+
+  Serial.println("SHT30 OK");
+
+  // WiFi for ESP-NOW
   WiFi.mode(WIFI_STA);
-  esp_now_init();
+
+  if (esp_now_init() != ESP_OK) {
+    Serial.println("ESP-NOW INIT FAILED");
+    while (1);
+  }
+
   esp_now_register_recv_cb(OnRecv);
 
-  esp_now_peer_info_t p{};
-  memcpy(p.peer_addr, HELTEC1, 6); esp_now_add_peer(&p);
-  memcpy(p.peer_addr, NODE1,   6); esp_now_add_peer(&p);
-  memcpy(p.peer_addr, NODE3,   6); esp_now_add_peer(&p);
+  // Add HELTEC1
+  esp_now_peer_info_t peerInfo = {};
+  memcpy(peerInfo.peer_addr, HELTEC1, 6);
+
+  if (esp_now_add_peer(&peerInfo) != ESP_OK) {
+    Serial.println("Failed to add HELTEC1");
+  }
+
+  // Add NODE1
+  memcpy(peerInfo.peer_addr, NODE1, 6);
+
+  if (esp_now_add_peer(&peerInfo) != ESP_OK) {
+    Serial.println("Failed to add NODE1");
+  }
+
+  // Add NODE3
+  memcpy(peerInfo.peer_addr, NODE3, 6);
+
+  if (esp_now_add_peer(&peerInfo) != ESP_OK) {
+    Serial.println("Failed to add NODE3");
+  }
 
   data.node_id = 2;
   data.source_id = 2;
+
+  Serial.println("NODE 2 READY");
 }
 
 void loop() {
-  data.air_temperature  = sht.readTemperature();
-  data.humidity         = sht.readHumidity();
 
-  data.soil_moisture    = 0;
+  // Keep T-A7670E power rail enabled
+  digitalWrite(BOARD_POWERON_PIN, HIGH);
+
+  // Read SHT30
+  data.air_temperature = sht.readTemperature();
+  data.humidity = sht.readHumidity();
+
+  // Unused sensors on Node 2
+  data.soil_moisture = 0;
   data.soil_temperature = 0;
-  data.conductivity     = 0;
-  data.ph               = 0;
-  data.distance         = 0;
-  data.hop              = 0;
+  data.conductivity = 0;
+  data.ph = 0;
+  data.distance = 0;
+  data.hop = 0;
 
+  // Send data
   sendData();
 
-  Serial.println("\n===== NODE 2 VIEW =====");
-  Serial.print("Air Temp: "); Serial.println(data.air_temperature);
-  Serial.print("Humidity: "); Serial.println(data.humidity);
+  // Serial Monitor Output
+  Serial.println();
+  Serial.println("===== NODE 2 VIEW =====");
+
+  Serial.print("Air Temp: ");
+  Serial.print(data.air_temperature);
+  Serial.println(" °C");
+
+  Serial.print("Humidity: ");
+  Serial.print(data.humidity);
+  Serial.println(" %");
+
   Serial.println("======================");
 
   delay(4000);
 }
-
-//END
-//START
-//X
